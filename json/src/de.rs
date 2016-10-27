@@ -170,6 +170,21 @@ impl<R: Read> DeserializerImpl<R> {
         }
     }
 
+    fn nested<T, F>(&mut self, f: F) -> Result<T>
+        where F: FnOnce(&mut Self) -> Result<T>
+    {
+        self.remaining_depth -= 1;
+        if self.remaining_depth == 0 {
+            return Err(self.peek_error(ErrorCode::Custom("recursion limit exceeded".into())));
+        }
+
+        let ret = f(self);
+
+        self.remaining_depth += 1;
+
+        ret
+    }
+
     fn parse_value<V>(&mut self, mut visitor: V) -> Result<V::Value>
         where V: de::Visitor,
     {
@@ -207,30 +222,16 @@ impl<R: Read> DeserializerImpl<R> {
                 visitor.visit_str(s)
             }
             b'[' => {
-                self.remaining_depth -= 1;
-                if self.remaining_depth == 0 {
-                    return Err(self.peek_error(stack_overflow()));
-                }
-
-                self.eat_char();
-                let ret = visitor.visit_seq(SeqVisitor::new(self));
-
-                self.remaining_depth += 1;
-
-                ret
+                self.nested(|self_| {
+                    self_.eat_char();
+                    visitor.visit_seq(SeqVisitor::new(self_))
+                })
             }
             b'{' => {
-                self.remaining_depth -= 1;
-                if self.remaining_depth == 0 {
-                    return Err(self.peek_error(stack_overflow()));
-                }
-
-                self.eat_char();
-                let ret = visitor.visit_map(MapVisitor::new(self));
-
-                self.remaining_depth += 1;
-
-                ret
+                self.nested(|self_| {
+                    self_.eat_char();
+                    visitor.visit_map(MapVisitor::new(self_))
+                })
             }
             _ => Err(self.peek_error(ErrorCode::ExpectedSomeValue)),
         };
@@ -543,10 +544,6 @@ impl<R: Read> DeserializerImpl<R> {
     }
 }
 
-fn stack_overflow() -> ErrorCode {
-    ErrorCode::Custom("recursion limit exceeded".into())
-}
-
 static POW10: [f64; 309] =
     [1e000, 1e001, 1e002, 1e003, 1e004, 1e005, 1e006, 1e007, 1e008, 1e009,
      1e010, 1e011, 1e012, 1e013, 1e014, 1e015, 1e016, 1e017, 1e018, 1e019,
@@ -634,15 +631,10 @@ impl<R: Read> de::Deserializer for DeserializerImpl<R> {
 
         match try!(self.peek_or_null()) {
             b'{' => {
-                self.remaining_depth -= 1;
-                if self.remaining_depth == 0 {
-                    return Err(self.peek_error(stack_overflow()));
-                }
-
-                self.eat_char();
-                let value = try!(visitor.visit(VariantVisitor::new(self)));
-
-                self.remaining_depth += 1;
+                let value = try!(self.nested(|self_| {
+                    self_.eat_char();
+                    visitor.visit(VariantVisitor::new(self_))
+                }));
 
                 try!(self.parse_whitespace());
 
